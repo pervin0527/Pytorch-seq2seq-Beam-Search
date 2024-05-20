@@ -102,11 +102,10 @@ def main():
 
     best_val_loss = None
     for e in range(1, args.epochs + 1):
-        train(e, seq2seq, optimizer, train_iter,
-              en_size, args.grad_clip, DE, EN)
+        train(e, seq2seq, optimizer, train_iter, en_size, args.grad_clip, DE, EN)
         val_loss = evaluate(seq2seq, val_iter, en_size, DE, EN)
-        print("[Epoch:%d] val_loss:%5.3f | val_pp:%5.2f"
-              % (e, val_loss, math.exp(val_loss)))
+        
+        print("[Epoch:%d] val_loss:%5.3f | val_pp:%5.2f" % (e, val_loss, math.exp(val_loss)))
 
         # Save the model if the validation loss is the best we've seen so far.
         if not best_val_loss or val_loss < best_val_loss:
