@@ -1,62 +1,142 @@
-import re
-import spacy
-import torch
-import torchtext.transforms as transforms
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-from torch.utils.data import DataLoader
-from torchtext.datasets import Multi30k
+import re
+import torch
+import random
+import unicodedata
+
+
+from torch import nn
+from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
 from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
 
-def yield_tokens(data_iter, tokenizer, index):
-    for data_sample in data_iter:
-        yield tokenizer(data_sample[index])
 
-def load_dataset(batch_size):
-    spacy_de = spacy.load('de_core_news_sm')
-    spacy_en = spacy.load('en_core_web_sm')
-    url = re.compile('(<url>.*</url>)')
+PAD_TOKEN = 0
+SOS_TOKEN = 1
+EOS_TOKEN = 2
+UNK_TOKEN = 3
+MAX_LENGTH = 50
 
-    def tokenize_de(text):
-        return [tok.text for tok in spacy_de.tokenizer(url.sub('@URL@', text))]
 
-    def tokenize_en(text):
-        return [tok.text for tok in spacy_en.tokenizer(url.sub('@URL@', text))]
+def split_data(total_path, train_path, valid_path, test_path, train_ratio=0.8, valid_ratio=0.1, test_ratio=0.1):
+    with open(total_path, 'r', encoding='utf-8') as file:
+        lines = file.readlines()
 
-    de_tokenizer = get_tokenizer(tokenize_de)
-    en_tokenizer = get_tokenizer(tokenize_en)
+    random.shuffle(lines)
 
-    train_iter, val_iter, test_iter = Multi30k(split=('train', 'valid', 'test'))
+    total_size = len(lines)
+    train_size = int(total_size * train_ratio)
+    valid_size = int(total_size * valid_ratio)
+    test_size = total_size - train_size - valid_size
 
-    de_vocab = build_vocab_from_iterator(yield_tokens(train_iter, de_tokenizer, index=0), specials=["<sos>", "<eos>", "<unk>", "<pad>"], min_freq=2)
-    en_vocab = build_vocab_from_iterator(yield_tokens(train_iter, en_tokenizer, index=1), specials=["<sos>", "<eos>", "<unk>", "<pad>"], max_size=10000)
+    train_data = lines[:train_size]
+    valid_data = lines[train_size:train_size + valid_size]
+    test_data = lines[train_size + valid_size:]
 
-    de_vocab.set_default_index(de_vocab["<unk>"])
-    en_vocab.set_default_index(en_vocab["<unk>"])
+    with open(train_path, 'w', encoding='utf-8') as train_file:
+        train_file.writelines(train_data)
 
-    text_transform_de = transforms.Sequential(
-        transforms.VocabTransform(de_vocab),
-        transforms.AddToken(token="<sos>", begin=True),
-        transforms.AddToken(token="<eos>", end=True)
-    )
+    with open(valid_path, 'w', encoding='utf-8') as valid_file:
+        valid_file.writelines(valid_data)
 
-    text_transform_en = transforms.Sequential(
-        transforms.VocabTransform(en_vocab),
-        transforms.AddToken(token="<sos>", begin=True),
-        transforms.AddToken(token="<eos>", end=True)
-    )
+    with open(test_path, 'w', encoding='utf-8') as test_file:
+        test_file.writelines(test_data)
 
-    def collate_fn(batch):
-        de_batch, en_batch = [], []
-        for (de_item, en_item) in batch:
-            de_batch.append(text_transform_de(de_tokenizer(de_item)))
-            en_batch.append(text_transform_en(en_tokenizer(en_item)))
-        de_batch = pad_sequence(de_batch, padding_value=de_vocab["<pad>"])
-        en_batch = pad_sequence(en_batch, padding_value=en_vocab["<pad>"])
-        return de_batch, en_batch
 
-    train_dataloader = DataLoader(list(train_iter), batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    val_dataloader = DataLoader(list(val_iter), batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    test_dataloader = DataLoader(list(test_iter), batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+"""
+유니코드 문자열을 아스키 문자열로 변환. 이 과정을 통해 텍스트 데이터의 일관성을 높인다.
+"""
+def unicodeToAscii(s):
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
-    return train_dataloader, val_dataloader, test_dataloader, de_vocab, en_vocab
+"""
+텍스트를 소문자로 변환하고, 불필요한 공백이나 문자가 아닌 문자를 제거해 모델의 학습 데이터 품질을 향상시킨다.
+"""
+def normalizeString(s):
+    s = unicodeToAscii(s.lower().strip())
+    s = re.sub(r"([.!?])", r" \1", s)
+    s = re.sub(r"[^a-zA-Z.!?]+", r" ", s)
+    return s
+
+
+def filterPair(p):
+    return len(p[0].split(' ')) < MAX_LENGTH and len(p[1].split(' ')) < MAX_LENGTH
+
+def filterPairs(pairs):
+    return [pair for pair in pairs if filterPair(pair)]
+
+
+def tokenize_and_build_vocab(lang, pairs):
+    if lang == 'eng':
+        tokenizer = get_tokenizer('spacy', language='en_core_web_sm')
+    elif lang == 'fra':
+        tokenizer = get_tokenizer('spacy', language='fr_core_news_sm')
+    else:
+        raise ValueError(f"Unsupported language: {lang}")
+
+    vocab = build_vocab_from_iterator(tokenizer(pair[0]) if lang == 'eng' else tokenizer(pair[1]) for pair in pairs)
+    vocab.insert_token('<pad>', PAD_TOKEN)
+    vocab.insert_token('<sos>', SOS_TOKEN)
+    vocab.insert_token('<eos>', EOS_TOKEN)
+    vocab.insert_token('<unk>', UNK_TOKEN)
+    vocab.set_default_index(vocab['<unk>'])
+
+    return vocab, tokenizer
+
+def build_vocab(data_dir, src_lang='eng', trg_lang='fra', save_dir=None):
+    lines = open(data_dir, encoding='utf-8').read().strip().split('\n')
+    pairs = [[normalizeString(s) for s in l.split('\t')] for l in lines]
+    pairs = filterPairs(pairs)
+
+    src_vocab, src_tokenizer = tokenize_and_build_vocab(src_lang, pairs)
+    trg_vocab, trg_tokenizer = tokenize_and_build_vocab(trg_lang, pairs)
+
+    if save_dir:
+        torch.save(src_vocab, os.path.join(save_dir, f'src_vocab_{src_lang}.pth'))
+        torch.save(trg_vocab, os.path.join(save_dir, f'trg_vocab_{trg_lang}.pth'))
+
+    return src_vocab, src_tokenizer, trg_vocab, trg_tokenizer
+
+
+class TranslationDataset(Dataset):
+    def __init__(self, data_dir, src_vocab, trg_vocab, src_tokenizer, trg_tokenizer, src_lang='eng'):
+        self.src_vocab = src_vocab
+        self.trg_vocab = trg_vocab
+        self.src_tokenizer = src_tokenizer
+        self.trg_tokenizer = trg_tokenizer
+        
+        lines = open(data_dir, encoding='utf-8').read().strip().split('\n')
+        self.pairs = [[normalizeString(s) for s in l.split('\t')] for l in lines]
+        self.pairs = filterPairs(self.pairs)
+        
+        if src_lang == 'fra':
+            self.pairs = [list(reversed(p)) for p in self.pairs]
+            
+    def __len__(self):
+        return len(self.pairs)
+    
+    def __getitem__(self, idx):
+        input_sentence, output_sentence = self.pairs[idx]
+        
+        input_tokens = self.src_tokenizer(input_sentence)
+        output_tokens = self.trg_tokenizer(output_sentence)
+        
+        input_tensor = [self.src_vocab['<sos>']] + [self.src_vocab[token] if token in self.src_vocab else self.src_vocab['<unk>'] for token in input_tokens] + [self.src_vocab['<eos>']]
+        output_tensor = [self.trg_vocab['<sos>']] + [self.trg_vocab[token] if token in self.trg_vocab else self.trg_vocab['<unk>'] for token in output_tokens] + [self.trg_vocab['<eos>']]
+        
+        return torch.tensor(input_tensor, dtype=torch.long), torch.tensor(output_tensor, dtype=torch.long)
+    
+
+def collate_fn(batch):
+    src_batch, trg_batch = [], []
+    for src_sample, trg_sample in batch:
+        src_batch.append(src_sample)
+        trg_batch.append(trg_sample)
+
+    src_batch = pad_sequence(src_batch, padding_value=PAD_TOKEN)
+    trg_batch = pad_sequence(trg_batch, padding_value=PAD_TOKEN)
+
+    return src_batch, trg_batch

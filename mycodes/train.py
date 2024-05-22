@@ -5,19 +5,20 @@ import torch
 
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+from torchtext.data.utils import get_tokenizer
 from torch.utils.tensorboard import SummaryWriter
 
-from dataset2 import load_dataset
 from dataset import Multi30kDataset
+from dataset2 import TranslationDataset, split_data, build_vocab, collate_fn, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN
 from model import Encoder, AttentionDecoder, Seq2Seq
 
 def train(model, dataloader, optimizer, criterion, vocab_size, grad_clip, device, epoch, writer):
     model.train()
     total_loss = 0
     num_batches = 0
-    for batch in tqdm(dataloader, desc='Train', leave=False):
-        src = batch["en_ids"].to(device)
-        trg = batch["de_ids"].to(device)
+    for src, trg in tqdm(dataloader, desc='Train', leave=False):
+        src = src.to(device)
+        trg = trg.to(device)
 
         optimizer.zero_grad()
         output = model(src, trg)
@@ -44,9 +45,9 @@ def valid(model, dataloader, criterion, vocab_size, trg_vocab, device, epoch, wr
     total_loss = 0
     num_batches = 0
     decoded_batch_list = []
-    for batch in tqdm(dataloader, desc='Valid', leave=False):
-        src = batch["en_ids"].to(device)
-        trg = batch["de_ids"].to(device)
+    for src, trg in tqdm(dataloader, desc='Valid', leave=False):
+        src = src.to(device)
+        trg = trg.to(device)
         with torch.no_grad():
             output = model(src, trg)
             output = output[1:].view(-1, vocab_size)
@@ -71,17 +72,47 @@ def valid(model, dataloader, criterion, vocab_size, trg_vocab, device, epoch, wr
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     save_dir = './runs'
     os.makedirs(save_dir, exist_ok=True)
     writer = SummaryWriter(log_dir=save_dir)
+
+    data_dir = '/home/pervinco/Desktop/en-fr/data'
+
+    total_data_dir = f'{data_dir}/eng-fra.txt'
+    train_data_dir = f'{data_dir}/train.txt'
+    valid_data_dir = f'{data_dir}/valid.txt'
+    test_data_dir = f'{data_dir}/test.txt'
+    src_lang, trg_lang = 'eng', 'fra'
+
+    if not os.path.exists(train_data_dir) or not os.path.exists(valid_data_dir):
+        split_data(total_data_dir, train_data_dir, valid_data_dir, test_data_dir)
+
+    if not os.path.exists(f'{data_dir}/src_vocab_{src_lang}.pth') and not os.path.exists(f'{data_dir}/trg_vocab_{trg_lang}.pth'):
+        src_vocab, src_tokenizer, trg_vocab, trg_tokenizer = build_vocab(total_data_dir, src_lang, trg_lang, data_dir)
+    else:
+        src_vocab = torch.load(f'{data_dir}/src_vocab_{src_lang}.pth')
+        trg_vocab = torch.load(f'{data_dir}/trg_vocab_{trg_lang}.pth')
+
+        if src_lang == 'eng':
+            src_tokenizer = get_tokenizer('spacy', language='en_core_web_sm')
+            trg_tokenizer = get_tokenizer('spacy', language='fr_core_news_sm')
+        elif src_lang == 'fra':
+            src_tokenizer = get_tokenizer('spacy', language='fr_core_news_sm')
+            trg_tokenizer = get_tokenizer('spacy', language='en_core_web_sm')
+
+    src_vocab_size = len(src_vocab)
+    trg_vocab_size = len(trg_vocab)
     
+
+
     epochs = 100
     batch_size = 128
-    learning_rate = 0.001 ## 0.0001
+    learning_rate = 0.0001
     grad_clip = 10.0
     max_len = 50
-    hidden_size = 512
-    embed_size = 256
+    hidden_size = 1000
+    embed_size = 1000
     encoder_layers = 2
     encoder_dropout = 0.5
     decoder_dropout = 0.2
@@ -94,25 +125,23 @@ if __name__ == "__main__":
     # sos_token_idx = src_vocab.get_stoi()['<sos>']
     # eos_token_idx = src_vocab.get_stoi()['<eos>']
     # pad_token_idx = src_vocab.get_stoi()['<pad>']
+    
     # train_dataset, valid_dataset, test_dataset = dataset.get_datasets()
     # collate_fn = dataset.get_collate_fn(pad_token_idx)
-    # train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn)
-    # valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn)
-    # test_dataloader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn)
-    
-    train_dataloader, valid_dataloader, test_dataloader, src_vocab, trg_vocab = load_dataset(batch_size)
-    src_vocab_size, trg_vocab_size = len(src_vocab), len(trg_vocab)
-    print(src_vocab_size, trg_vocab_size)
-    
-    sos_token_idx = src_vocab.get_stoi()['<sos>']
-    eos_token_idx = src_vocab.get_stoi()['<eos>']
-    pad_token_idx = src_vocab.get_stoi()['<pad>']
+
+    train_dataset = TranslationDataset(train_data_dir, src_vocab, trg_vocab, src_tokenizer, trg_tokenizer, src_lang)
+    valid_dataset = TranslationDataset(valid_data_dir, src_vocab, trg_vocab, src_tokenizer, trg_tokenizer, src_lang)
+    test_dataset = TranslationDataset(test_data_dir, src_vocab, trg_vocab, src_tokenizer, trg_tokenizer, src_lang)
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate_fn)
+    valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn)
 
     encoder = Encoder(src_vocab_size, embed_size, hidden_size, n_layers=encoder_layers, dropout=encoder_dropout).to(device)
     decoder = AttentionDecoder(embed_size, hidden_size, trg_vocab_size, n_layers=1).to(device)
-    seq2seq = Seq2Seq(encoder, decoder, sos_token_idx, eos_token_idx, max_len, device).to(device)
+    seq2seq = Seq2Seq(encoder, decoder, SOS_TOKEN, EOS_TOKEN, max_len, device).to(device)
     optimizer = torch.optim.Adam(seq2seq.parameters(), lr=learning_rate)
-    criterion = torch.nn.CrossEntropyLoss(ignore_index=pad_token_idx)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_TOKEN)
     
     best_val_loss = float('inf')
     for epoch in range(1, epochs+1):
