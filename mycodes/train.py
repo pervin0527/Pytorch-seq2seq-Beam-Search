@@ -8,9 +8,8 @@ from torch.utils.data import DataLoader
 from torchtext.data.utils import get_tokenizer
 from torch.utils.tensorboard import SummaryWriter
 
-from dataset import Multi30kDataset
-from dataset2 import TranslationDataset, split_data, build_vocab, collate_fn, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN
 from model import Encoder, AttentionDecoder, Seq2Seq
+from dataset import TranslationDataset, split_data, build_vocab, collate_fn, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN, UNK_TOKEN
 
 def train(model, dataloader, optimizer, criterion, vocab_size, grad_clip, device, epoch, writer):
     model.train()
@@ -45,10 +44,10 @@ def valid(model, dataloader, criterion, vocab_size, trg_vocab, device, epoch, wr
     total_loss = 0
     num_batches = 0
     decoded_batch_list = []
-    for src, trg in tqdm(dataloader, desc='Valid', leave=False):
-        src = src.to(device)
-        trg = trg.to(device)
-        with torch.no_grad():
+    with torch.no_grad():
+        for src, trg in tqdm(dataloader, desc='Valid', leave=False):
+            src = src.to(device)
+            trg = trg.to(device)
             output = model(src, trg)
             output = output[1:].view(-1, vocab_size)
             loss = criterion(output, trg[1:].contiguous().view(-1))
@@ -57,11 +56,6 @@ def valid(model, dataloader, criterion, vocab_size, trg_vocab, device, epoch, wr
             decoded_batch = model.decode(src, trg, method='beam-search')
             decoded_batch_list.append(decoded_batch)
     
-    for sentence_index in decoded_batch_list[0]:
-        decode_text_arr = [trg_vocab.get_itos()[i] for i in sentence_index[0]]
-        decode_sentence = " ".join(decode_text_arr[1:-1])
-        print(f"Pred target : {decode_sentence}")
-
     valid_loss = total_loss / num_batches
     valid_perplexity = math.exp(valid_loss)
 
@@ -103,31 +97,19 @@ if __name__ == "__main__":
 
     src_vocab_size = len(src_vocab)
     trg_vocab_size = len(trg_vocab)
+    print(src_vocab_size, trg_vocab_size)
     
-
-
     epochs = 100
-    batch_size = 128
+    batch_size = 80
     learning_rate = 0.0001
-    grad_clip = 10.0
+    grad_clip = 1
     max_len = 50
-    hidden_size = 1000
-    embed_size = 1000
-    encoder_layers = 2
-    encoder_dropout = 0.5
-    decoder_dropout = 0.2
-
-    # dataset = Multi30kDataset(max_length=max_len, lower=True, min_freq=2)
-    # src_vocab = dataset.en_vocab
-    # trg_vocab = dataset.de_vocab
-    # src_vocab_size = len(src_vocab)
-    # trg_vocab_size = len(trg_vocab)
-    # sos_token_idx = src_vocab.get_stoi()['<sos>']
-    # eos_token_idx = src_vocab.get_stoi()['<eos>']
-    # pad_token_idx = src_vocab.get_stoi()['<pad>']
     
-    # train_dataset, valid_dataset, test_dataset = dataset.get_datasets()
-    # collate_fn = dataset.get_collate_fn(pad_token_idx)
+    embed_dim = 620
+    hidden_dim = 1000
+    encoder_layers = 1
+    encoder_dropout = 0.0
+    decoder_dropout = 0.0
 
     train_dataset = TranslationDataset(train_data_dir, src_vocab, trg_vocab, src_tokenizer, trg_tokenizer, src_lang)
     valid_dataset = TranslationDataset(valid_data_dir, src_vocab, trg_vocab, src_tokenizer, trg_tokenizer, src_lang)
@@ -137,10 +119,12 @@ if __name__ == "__main__":
     valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate_fn)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate_fn)
 
-    encoder = Encoder(src_vocab_size, embed_size, hidden_size, n_layers=encoder_layers, dropout=encoder_dropout).to(device)
-    decoder = AttentionDecoder(embed_size, hidden_size, trg_vocab_size, n_layers=1).to(device)
+    encoder = Encoder(src_vocab_size, embed_dim, hidden_dim, n_layers=encoder_layers, dropout=encoder_dropout).to(device)
+    decoder = AttentionDecoder(embed_dim, hidden_dim, trg_vocab_size, n_layers=1).to(device)
     seq2seq = Seq2Seq(encoder, decoder, SOS_TOKEN, EOS_TOKEN, max_len, device).to(device)
-    optimizer = torch.optim.Adam(seq2seq.parameters(), lr=learning_rate)
+    # optimizer = torch.optim.Adam(seq2seq.parameters(), lr=learning_rate)
+
+    optimizer = torch.optim.Adadelta(seq2seq.parameters(), rho=0.95, eps=1e-6)
     criterion = torch.nn.CrossEntropyLoss(ignore_index=PAD_TOKEN)
     
     best_val_loss = float('inf')
